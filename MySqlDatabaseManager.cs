@@ -10,8 +10,10 @@ namespace SystemInfoService
         public static void InitializeDatabase(string server, string database,
                                     string userId, string password)
         {
-            // Формируем строку подключения
-            connectionString = $"Server={server};Database={database};User ID={userId};Password={password};CharSet=utf8mb4;";
+            // Расшифровываем пароль AES-256
+            string decryptedPassword = AesEncryption.Decrypt(password);
+
+            connectionString = $"Server={server};Database={database};User ID={userId};Password={decryptedPassword};CharSet=utf8mb4;";
 
             // Проверяем подключение
             using (var connection = new MySqlConnection(connectionString))
@@ -68,13 +70,13 @@ namespace SystemInfoService
                     ProcessorCount INT,
                     UserName VARCHAR(100),
                     Is64BitOS BOOLEAN,
-                    IPAddress VARCHAR(45), -- Новое поле для IPv4/IPv6
+                    IPAddress VARCHAR(45),
                     ScanDateTime DATETIME NOT NULL,
                     FOREIGN KEY (ComputerID) REFERENCES Computers(ComputerID) ON DELETE CASCADE,
                     UNIQUE KEY unique_computer_general (ComputerID, ScanDateTime)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
 
-                // Processors - ВОССТАНАВЛИВАЕМ ScanDateTime в UNIQUE KEY
+                // Processors
                 @"CREATE TABLE IF NOT EXISTS Processors (
                     ProcessorID INT PRIMARY KEY AUTO_INCREMENT,
                     ComputerID INT NOT NULL,
@@ -90,7 +92,7 @@ namespace SystemInfoService
                     INDEX idx_scan (ScanDateTime)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
 
-                // Motherboards - ВОССТАНАВЛИВАЕМ ScanDateTime в UNIQUE KEY
+                // Motherboards
                 @"CREATE TABLE IF NOT EXISTS Motherboards (
                     MotherboardID INT PRIMARY KEY AUTO_INCREMENT,
                     ComputerID INT NOT NULL,
@@ -106,7 +108,7 @@ namespace SystemInfoService
                     INDEX idx_scan (ScanDateTime)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
 
-                // HardDrives - ВОССТАНАВЛИВАЕМ ScanDateTime в UNIQUE KEY
+                // HardDrives
                 @"CREATE TABLE IF NOT EXISTS HardDrives (
                     HardDriveID INT PRIMARY KEY AUTO_INCREMENT,
                     ComputerID INT NOT NULL,
@@ -123,7 +125,7 @@ namespace SystemInfoService
                     INDEX idx_scan (ScanDateTime)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
 
-                // Memory - ВОССТАНАВЛИВАЕМ ScanDateTime в UNIQUE KEY
+                // Memory
                 @"CREATE TABLE IF NOT EXISTS Memory (
                     MemoryID INT PRIMARY KEY AUTO_INCREMENT,
                     ComputerID INT NOT NULL,
@@ -135,7 +137,7 @@ namespace SystemInfoService
                     INDEX idx_scan (ScanDateTime)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
 
-                // MemoryModules - оставляем как есть
+                // MemoryModules
                 @"CREATE TABLE IF NOT EXISTS MemoryModules (
                     MemoryModuleID INT PRIMARY KEY AUTO_INCREMENT,
                     MemoryID INT NOT NULL,
@@ -149,7 +151,7 @@ namespace SystemInfoService
                     UNIQUE KEY unique_memory_slot (MemoryID, SlotLocation)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
 
-                // VideoCards - ВОССТАНАВЛИВАЕМ ScanDateTime в UNIQUE KEY
+                // VideoCards
                 @"CREATE TABLE IF NOT EXISTS VideoCards (
                     VideoCardID INT PRIMARY KEY AUTO_INCREMENT,
                     ComputerID INT NOT NULL,
@@ -161,6 +163,54 @@ namespace SystemInfoService
                     ScanDateTime DATETIME NOT NULL,
                     FOREIGN KEY (ComputerID) REFERENCES Computers(ComputerID) ON DELETE CASCADE,
                     UNIQUE KEY unique_computer_video_scan (ComputerID, ScanDateTime),
+                    INDEX idx_computer (ComputerID),
+                    INDEX idx_scan (ScanDateTime)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+
+                // InstalledSoftware
+                @"CREATE TABLE IF NOT EXISTS InstalledSoftware (
+                    SoftwareID INT PRIMARY KEY AUTO_INCREMENT,
+                    ComputerID INT NOT NULL,
+                    SoftwareName VARCHAR(200),
+                    SoftwareVersion VARCHAR(100),
+                    Publisher VARCHAR(200),
+                    InstallDate DATE,
+                    SizeMB DECIMAL(10,2),
+                    ScanDateTime DATETIME NOT NULL,
+                    FOREIGN KEY (ComputerID) REFERENCES Computers(ComputerID) ON DELETE CASCADE,
+                    INDEX idx_computer (ComputerID),
+                    INDEX idx_scan (ScanDateTime)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+
+                // SystemAlerts
+                @"CREATE TABLE IF NOT EXISTS SystemAlerts (
+                    AlertID INT PRIMARY KEY AUTO_INCREMENT,
+                    ComputerID INT NOT NULL,
+                    AlertType VARCHAR(50),
+                    AlertSource VARCHAR(100),
+                    AlertMessage TEXT,
+                    AlertValue VARCHAR(100),
+                    IsResolved BOOLEAN DEFAULT FALSE,
+                    ScanDateTime DATETIME NOT NULL,
+                    FOREIGN KEY (ComputerID) REFERENCES Computers(ComputerID) ON DELETE CASCADE,
+                    INDEX idx_computer (ComputerID),
+                    INDEX idx_resolved (IsResolved),
+                    INDEX idx_scan (ScanDateTime)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
+
+                // SecurityInfo
+                @"CREATE TABLE IF NOT EXISTS SecurityInfo (
+                    SecurityID INT PRIMARY KEY AUTO_INCREMENT,
+                    ComputerID INT NOT NULL,
+                    AntivirusName VARCHAR(100),
+                    AntivirusStatus VARCHAR(50),
+                    WindowsUpdateStatus VARCHAR(50),
+                    LastWindowsUpdate DATE,
+                    FirewallEnabled BOOLEAN,
+                    LastLoginUser VARCHAR(100),
+                    ScanDateTime DATETIME NOT NULL,
+                    FOREIGN KEY (ComputerID) REFERENCES Computers(ComputerID) ON DELETE CASCADE,
+                    UNIQUE KEY unique_computer_security_scan (ComputerID, ScanDateTime),
                     INDEX idx_computer (ComputerID),
                     INDEX idx_scan (ScanDateTime)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"

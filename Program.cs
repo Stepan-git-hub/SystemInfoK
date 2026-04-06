@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Management;
 using System.Text;
 using System.Threading;
@@ -8,26 +10,36 @@ using MySql.Data.MySqlClient;
 
 namespace SystemInfoService
 {
-    class Program
+    public class Program
     {
         private static ConfigSettings config;
         private static Timer scanTimer;
-        private static bool isRunning = false;
+        private static bool isRunning = true;  // Используется для контроля работы
         private static DateTime nextScanTime;
         private static Timer countdownTimer;
         private static object consoleLock = new object();
+
         static void Main(string[] args)
         {
+            // Проверка на режим шифрования пароля (уже не нужен, так как отдельный проект)
+            // Но если хотите оставить возможность через аргумент --encrypt, то:
+            if (args.Length > 0 && args[0].ToLower() == "--encrypt")
+            {
+                // Временно вызываем метод для шифрования (но лучше использовать отдельный проект)
+                Console.WriteLine("Используйте отдельный проект PasswordEncoder для шифрования пароля");
+                Console.WriteLine("Нажмите любую клавишу...");
+                Console.ReadKey();
+                return;
+            }
+
             Console.OutputEncoding = Encoding.UTF8;
             Console.Title = "System Information Service";
 
-            // Очищаем консоль
             Console.Clear();
 
             ConsoleHelper.PrintHeader("СИСТЕМА МОНИТОРИНГА ИНФОРМАЦИИ О ПК");
             ConsoleHelper.PrintInfo("Загрузка конфигурации...");
 
-            // Загрузка конфигурации
             config = LoadConfig();
             ValidateConfig(config);
 
@@ -42,7 +54,6 @@ namespace SystemInfoService
             ConsoleHelper.PrintInfo("Для выхода нажмите Ctrl+C");
             ConsoleHelper.PrintSeparator();
 
-            // Инициализация логгера
             Logger.SetLogLevel(config.LogLevel);
             Logger.LogInfo("Служба запущена");
 
@@ -60,14 +71,12 @@ namespace SystemInfoService
 
                 ConsoleHelper.PrintSuccess("Подключение к MySQL успешно");
 
-                // Первое сканирование сразу при запуске
                 if (config.ScanOnStartup)
                 {
                     ConsoleHelper.PrintSection("ПЕРВОНАЧАЛЬНОЕ СКАНИРОВАНИЕ");
                     PerformSystemScan();
                 }
 
-                // Настройка таймера для периодического сканирования
                 SetupScanTimer();
 
                 ConsoleHelper.PrintSection("СЛУЖБА ЗАПУЩЕНА");
@@ -75,20 +84,18 @@ namespace SystemInfoService
                 ConsoleHelper.PrintInfo("Заголовок окна показывает обратный отсчет");
                 ConsoleHelper.PrintInfo("Детальные логи записываются в system_monitoring.log");
 
-                // Ожидание нажатия Ctrl+C
                 var exitEvent = new ManualResetEvent(false);
                 Console.CancelKeyPress += (sender, e) =>
                 {
-                    e.Cancel = true; // Предотвратить немедленное завершение
+                    e.Cancel = true;
                     ConsoleHelper.PrintSection("ОСТАНОВКА СЛУЖБЫ");
                     ConsoleHelper.PrintInfo("Завершение работы...");
+                    isRunning = false;
                     exitEvent.Set();
                 };
 
-                // Ожидание события выхода
                 exitEvent.WaitOne();
 
-                // Остановка таймеров перед выходом
                 scanTimer?.Dispose();
                 countdownTimer?.Dispose();
                 ConsoleHelper.PrintSuccess("Служба остановлена");
@@ -108,27 +115,20 @@ namespace SystemInfoService
 
         static void SetupScanTimer()
         {
-            // Конвертируем минуты в миллисекунды
             int intervalMs = (int)(config.ScanIntervalMinutes * 60 * 1000);
-
-            // Устанавливаем время следующего сканирования
             nextScanTime = DateTime.Now.AddMilliseconds(intervalMs);
 
             ConsoleHelper.PrintInfo($"Таймер сканирования: каждые {config.ScanIntervalMinutes} мин.");
-            ConsoleHelper.PrintInfo($"Следующее сканирование: {nextScanTime:HH:mm:ss}");
 
-            // Таймер для периодического сканирования
             scanTimer = new Timer(_ =>
             {
                 try
                 {
+                    if (!isRunning) return;
                     Logger.LogInfo($"Запуск запланированного сканирования...");
                     PerformSystemScan();
-
-                    // Обновляем время следующего сканирования
                     nextScanTime = DateTime.Now.AddMilliseconds(intervalMs);
-
-                    Logger.LogInfo($"Сканирование завершено. Следующее через {config.ScanIntervalMinutes} минут");
+                    Logger.LogInfo($"Сканирование завершено. Следующее через {config.ScanIntervalMinutes} минут в {nextScanTime:HH:mm:ss}");
                 }
                 catch (Exception ex)
                 {
@@ -138,7 +138,6 @@ namespace SystemInfoService
 
             Logger.LogVerbose($"Таймер сканирования установлен на {intervalMs} мс (каждые {config.ScanIntervalMinutes} минут)");
 
-            // Запускаем таймер обратного отсчета (обновление каждую секунду)
             countdownTimer = new Timer(_ =>
             {
                 UpdateCountdown();
@@ -151,17 +150,15 @@ namespace SystemInfoService
             {
                 if (!isRunning) return;
 
-                // Проверяем, не пора ли сканировать
-                if (DateTime.Now >= nextScanTime)
-                {
-                    // Если время пришло, обновляем для следующего цикла
-                    int intervalMs = (int)(config.ScanIntervalMinutes * 60 * 1000);
-                    nextScanTime = DateTime.Now.AddMilliseconds(intervalMs);
-                }
-
                 TimeSpan timeLeft = nextScanTime - DateTime.Now;
 
-                // Форматируем время
+                if (timeLeft.TotalMilliseconds < 0)
+                {
+                    int intervalMs = (int)(config.ScanIntervalMinutes * 60 * 1000);
+                    nextScanTime = DateTime.Now.AddMilliseconds(intervalMs);
+                    timeLeft = nextScanTime - DateTime.Now;
+                }
+
                 string timeLeftFormatted;
                 if (timeLeft.TotalHours >= 1)
                 {
@@ -176,11 +173,9 @@ namespace SystemInfoService
                     timeLeftFormatted = $"{timeLeft.Seconds:00} сек";
                 }
 
-                // Обновляем заголовок консоли
                 string nextScanStr = nextScanTime.ToString("HH:mm:ss");
                 string title = $"System Info Monitor | Следующее сканирование: {nextScanStr} | Осталось: {timeLeftFormatted}";
 
-                // Безопасное обновление заголовка консоли
                 try
                 {
                     if (Console.Title != title)
@@ -188,12 +183,8 @@ namespace SystemInfoService
                         Console.Title = title;
                     }
                 }
-                catch
-                {
-                    // Игнорируем ошибки при обновлении заголовка
-                }
+                catch { }
 
-                // Выводим в консоль каждые 30 секунд для дебага
                 if (timeLeft.Seconds == 0 || timeLeft.Seconds == 30)
                 {
                     Logger.LogVerbose($"До следующего сканирования: {timeLeftFormatted}");
@@ -204,6 +195,7 @@ namespace SystemInfoService
                 Logger.LogVerbose($"Ошибка обновления обратного отсчета: {ex.Message}");
             }
         }
+
         static void PerformSystemScan()
         {
             DateTime scanDateTime = DateTime.Now;
@@ -214,11 +206,10 @@ namespace SystemInfoService
 
             try
             {
-                // 1. Сохраняем информацию о компьютере (он сам определит - новая конфигурация или нет)
                 ConsoleHelper.PrintVerbose("Сохранение информации о компьютере...");
                 long computerId = MySqlDataRepository.SaveComputerInfo(
-                Environment.MachineName,
-                scanDateTime
+                    Environment.MachineName,
+                    scanDateTime
                 );
 
                 if (computerId <= 0)
@@ -228,27 +219,53 @@ namespace SystemInfoService
 
                 ConsoleHelper.PrintSuccess($"ComputerID: {computerId}");
 
-                // 2. Проверяем, это новый ComputerID или существующий
                 bool isNewConfiguration = MySqlDataRepository.IsNewConfiguration(computerId);
 
                 if (!isNewConfiguration)
                 {
-                    // Это существующая конфигурация - компоненты уже сохранены ранее
-                    ConsoleHelper.PrintInfo("Конфигурация не изменилась. Компоненты уже сохранены.");
+                    ConsoleHelper.PrintInfo("Конфигурация не изменилась. Обновление динамических данных...");
+
+                    // ВСЕГДА СОХРАНЯЕМ ДАННЫЕ, КОТОРЫЕ МОГУТ ИЗМЕНИТЬСЯ
+                    ConsoleHelper.PrintVerbose("Сбор информации об установленных программах...");
+                    MySqlDataRepository.SaveInstalledSoftware(computerId, scanDateTime);
+
+                    ConsoleHelper.PrintVerbose("Сбор информации о безопасности...");
+                    MySqlDataRepository.SaveSecurityInfo(computerId, scanDateTime);
+
+                    // Получаем метрики для проверки предупреждений
+                    double currentCpuUsage = GetCurrentCPUUsage();
+                    double currentMemoryUsage = GetCurrentMemoryUsage();
+                    double currentFreeSpacePercent = GetFreeDiskSpacePercent();
+                    double currentTemperature = GetCurrentTemperature();
+
+                    ConsoleHelper.PrintVerbose($"  • Загрузка CPU: {currentCpuUsage:F1}%");
+                    ConsoleHelper.PrintVerbose($"  • Использование памяти: {currentMemoryUsage:F1}%");
+                    ConsoleHelper.PrintVerbose($"  • Свободно на диске: {currentFreeSpacePercent:F1}%");
+                    ConsoleHelper.PrintVerbose($"  • Температура: {(currentTemperature > 0 ? currentTemperature.ToString("F1") + "°C" : "недоступно")}");
+
+                    ConsoleHelper.PrintVerbose("Проверка системных предупреждений...");
+                    MySqlDataRepository.CheckAndCreateAlerts(computerId, currentCpuUsage, currentMemoryUsage,
+                                                               currentFreeSpacePercent, currentTemperature, scanDateTime);
 
                     ConsoleHelper.PrintSection("ИТОГИ СКАНИРОВАНИЯ");
                     ConsoleHelper.PrintSuccess($"Сканирование завершено (конфигурация не изменилась)!");
                     ConsoleHelper.PrintInfo($"ComputerID: {computerId}");
                     ConsoleHelper.PrintInfo($"Обновлено время сканирования: {scanDateTime:HH:mm:ss}");
+                    ConsoleHelper.PrintInfo($"Программы: сохранены, Безопасность: сохранена, Предупреждения: проверены");
 
-                    TimeSpan timeLeft = nextScanTime - DateTime.Now;
-                    ConsoleHelper.PrintProgress($"Следующее сканирование: {nextScanTime:HH:mm:ss}");
+                    TimeSpan timeUntilNext = nextScanTime - DateTime.Now;
+                    if (timeUntilNext.TotalMilliseconds < 0)
+                    {
+                        int intervalMs = (int)(config.ScanIntervalMinutes * 60 * 1000);
+                        nextScanTime = DateTime.Now.AddMilliseconds(intervalMs);
+                        timeUntilNext = nextScanTime - DateTime.Now;
+                    }
+                    ConsoleHelper.PrintProgress($"Следующее сканирование: {nextScanTime:HH:mm:ss} (через {FormatTimeSpan(timeUntilNext)})");
 
                     Logger.LogInfo($"Сканирование завершено (конфигурация не изменилась). ComputerID: {computerId}");
                     return;
                 }
 
-                // 3. Это НОВАЯ конфигурация - сохраняем все компоненты
                 ConsoleHelper.PrintInfo("Сохранение компонентов новой конфигурации...");
 
                 int totalComponents = 0;
@@ -258,10 +275,8 @@ namespace SystemInfoService
                 int videoCardCount = 0;
                 double totalMemoryGB = 0;
 
-                // 4.1. Общая информация
+                // Общая информация
                 ConsoleHelper.PrintVerbose("Сбор информации о компьютере...");
-
-                // Получаем IP-адрес
                 string ipAddress = MySqlDataRepository.GetLocalIPAddress();
 
                 MySqlDataRepository.SaveGeneralInfo(
@@ -270,14 +285,14 @@ namespace SystemInfoService
                     Environment.ProcessorCount,
                     Environment.UserName,
                     Environment.Is64BitOperatingSystem,
-                    ipAddress, // Добавляем IP-адрес
+                    ipAddress,
                     scanDateTime
                 );
 
                 ConsoleHelper.PrintSuccess($"Общая информация сохранена (ОС: {Environment.OSVersion}, Процессоров: {Environment.ProcessorCount}, IP: {ipAddress})");
                 totalComponents++;
 
-                // 4.2. Информация о процессоре
+                // Процессор
                 ConsoleHelper.PrintVerbose("Сбор информации о процессоре...");
                 using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("select * from Win32_Processor"))
                 {
@@ -307,11 +322,11 @@ namespace SystemInfoService
                         ConsoleHelper.PrintVerbose($"  • Производитель: {obj["Manufacturer"]?.ToString()}");
 
                         totalComponents++;
-                        break; // Берем только первый процессор
+                        break;
                     }
                 }
 
-                // 4.3. Информация о материнской плате
+                // Материнская плата
                 ConsoleHelper.PrintVerbose("Сбор информации о материнской плате...");
                 using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("select * from Win32_BaseBoard"))
                 {
@@ -339,15 +354,14 @@ namespace SystemInfoService
                     }
                 }
 
-                // 4.4. Информация о жестких дисках
+                // Жесткие диски
                 ConsoleHelper.PrintVerbose("Сбор информации о жестких дисках...");
                 driveCount = 0;
                 using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("select * from Win32_DiskDrive"))
                 {
                     foreach (ManagementObject obj in searcher.Get())
                     {
-                        ulong sizeBytes = obj["Size"] != null ?
-                            Convert.ToUInt64(obj["Size"]) : 0;
+                        ulong sizeBytes = obj["Size"] != null ? Convert.ToUInt64(obj["Size"]) : 0;
                         double sizeGB = sizeBytes / 1073741824.0;
 
                         int? bytesPerSector = obj["BytesPerSector"] != null ?
@@ -383,7 +397,7 @@ namespace SystemInfoService
                     ConsoleHelper.PrintWarning("Жесткие диски не обнаружены");
                 }
 
-                // 4.5. Информация об оперативной памяти
+                // Оперативная память
                 ConsoleHelper.PrintVerbose("Сбор информации об оперативной памяти...");
                 using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("select * from Win32_ComputerSystem"))
                 {
@@ -403,7 +417,6 @@ namespace SystemInfoService
                     ConsoleHelper.PrintSuccess($"Оперативная память: {totalMemoryGB:F2} GB");
                     totalComponents++;
 
-                    // 4.6. Информация о модулях памяти
                     ConsoleHelper.PrintVerbose("Сбор информации о модулях памяти...");
                     memoryModuleCount = 0;
                     using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("SELECT * FROM Win32_PhysicalMemory"))
@@ -441,15 +454,14 @@ namespace SystemInfoService
                     ConsoleHelper.PrintWarning("Не удалось сохранить информацию о памяти");
                 }
 
-                // 4.7. Информация о видеокартах
+                // Видеокарты
                 ConsoleHelper.PrintVerbose("Сбор информации о видеокартах...");
                 videoCardCount = 0;
                 using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("select * from Win32_VideoController"))
                 {
                     foreach (ManagementObject obj in searcher.Get())
                     {
-                        ulong vramBytes = obj["AdapterRAM"] != null ?
-                            Convert.ToUInt64(obj["AdapterRAM"]) : 0;
+                        ulong vramBytes = obj["AdapterRAM"] != null ? Convert.ToUInt64(obj["AdapterRAM"]) : 0;
                         double vramGB = vramBytes / 1073741824.0;
 
                         int? refreshRate = obj["CurrentRefreshRate"] != null ?
@@ -482,10 +494,43 @@ namespace SystemInfoService
                     ConsoleHelper.PrintWarning("Видеокарты не обнаружены");
                 }
 
+                // ============================================================
+                // НОВЫЕ ФУНКЦИИ ДЛЯ АДМИНИСТРАТОРА (для новой конфигурации)
+                // ============================================================
+
+                ConsoleHelper.PrintVerbose("Сбор информации об установленных программах...");
+                MySqlDataRepository.SaveInstalledSoftware(computerId, scanDateTime);
+                ConsoleHelper.PrintSuccess("Список программ сохранен");
+
+                ConsoleHelper.PrintVerbose("Сбор информации о безопасности...");
+                MySqlDataRepository.SaveSecurityInfo(computerId, scanDateTime);
+                ConsoleHelper.PrintSuccess("Информация о безопасности сохранена");
+
+                double newCpuUsage = GetCurrentCPUUsage();
+                double newMemoryUsage = GetCurrentMemoryUsage();
+                double newFreeSpacePercent = GetFreeDiskSpacePercent();
+                double newTemperature = GetCurrentTemperature();
+
+                ConsoleHelper.PrintVerbose($"  • Загрузка CPU: {newCpuUsage:F1}%");
+                ConsoleHelper.PrintVerbose($"  • Использование памяти: {newMemoryUsage:F1}%");
+                ConsoleHelper.PrintVerbose($"  • Свободно на диске: {newFreeSpacePercent:F1}%");
+                ConsoleHelper.PrintVerbose($"  • Температура: {(newTemperature > 0 ? newTemperature.ToString("F1") + "°C" : "недоступно")}");
+
+                ConsoleHelper.PrintVerbose("Проверка системных предупреждений...");
+                MySqlDataRepository.CheckAndCreateAlerts(computerId, newCpuUsage, newMemoryUsage,
+                                                           newFreeSpacePercent, newTemperature, scanDateTime);
+                ConsoleHelper.PrintSuccess("Проверка предупреждений завершена");
+
+                // ============================================================
+
                 ConsoleHelper.PrintSection("ИТОГИ СКАНИРОВАНИЯ");
                 ConsoleHelper.PrintSuccess($"Сохранена НОВАЯ конфигурация!");
                 ConsoleHelper.PrintInfo($"ComputerID: {computerId}");
                 ConsoleHelper.PrintInfo($"Время сканирования: {scanDateTime:HH:mm:ss}");
+                ConsoleHelper.PrintInfo($"Всего сохранено компонентов: {totalComponents}");
+                ConsoleHelper.PrintInfo($"Установленных программ: информация сохранена");
+                ConsoleHelper.PrintInfo($"Безопасность: данные сохранены");
+                ConsoleHelper.PrintInfo($"Предупреждения: проверка выполнена");
 
                 Logger.LogInfo($"Сохранена новая конфигурация. ComputerID: {computerId}");
             }
@@ -504,7 +549,6 @@ namespace SystemInfoService
             }
         }
 
-        // Вспомогательный метод для форматирования времени (добавьте в класс Program)
         static string FormatTimeSpan(TimeSpan ts)
         {
             if (ts.TotalHours >= 1)
@@ -517,22 +561,15 @@ namespace SystemInfoService
 
         static ConfigSettings LoadConfig()
         {
-            // Определяем несколько возможных местоположений конфига в порядке приоритета
             List<string> possibleConfigPaths = new List<string>
             {
-                // 1. Текущая папка с исполняемым файлом (для запуска вручную)
                 Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.ini"),
-
-                // 2. Папка CommonApplicationData (для службы)
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                             "SystemInfoService", "config.ini"),
-
-                // 3. Папка ApplicationData текущего пользователя
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                             "SystemInfoService", "config.ini")
             };
 
-            // Значения по умолчанию
             var defaultConfig = new ConfigSettings
             {
                 ScanIntervalMinutes = 60,
@@ -546,7 +583,6 @@ namespace SystemInfoService
 
             string foundConfigPath = null;
 
-            // Ищем существующий конфиг
             foreach (string configPath in possibleConfigPaths)
             {
                 if (File.Exists(configPath))
@@ -556,7 +592,6 @@ namespace SystemInfoService
                 }
             }
 
-            // Если конфиг не найден, создаем его в первом доступном месте
             if (foundConfigPath == null)
             {
                 foreach (string configPath in possibleConfigPaths)
@@ -575,14 +610,12 @@ namespace SystemInfoService
                 }
             }
 
-            // Если так и не удалось создать конфиг, используем настройки по умолчанию
             if (foundConfigPath == null)
             {
                 ConsoleHelper.PrintWarning("Не удалось создать файл конфигурации. Используются настройки по умолчанию.");
                 return defaultConfig;
             }
 
-            // Загружаем настройки из найденного конфига
             try
             {
                 return LoadConfigFromFile(foundConfigPath, defaultConfig);
@@ -686,7 +719,6 @@ namespace SystemInfoService
             iniContent.AppendLine($"MySQLUserId={config.MySQLUserId}");
             iniContent.AppendLine($"MySQLPassword={config.MySQLPassword}");
 
-            // Создаем папку если нужно
             string configDir = Path.GetDirectoryName(configPath);
             if (!Directory.Exists(configDir))
                 Directory.CreateDirectory(configDir);
@@ -696,13 +728,13 @@ namespace SystemInfoService
 
         static void ValidateConfig(ConfigSettings config)
         {
-            if (config.ScanIntervalMinutes < 1) // Минимум 1 минута
+            if (config.ScanIntervalMinutes < 1)
             {
                 ConsoleHelper.PrintWarning("Внимание: ScanIntervalMinutes слишком мал. Установлено минимальное значение: 1 минута");
                 config.ScanIntervalMinutes = 1;
             }
 
-            if (config.ScanIntervalMinutes > 43200) // Максимум 30 дней в минутах (30*24*60)
+            if (config.ScanIntervalMinutes > 43200)
             {
                 ConsoleHelper.PrintWarning("Внимание: ScanIntervalMinutes слишком велик. Установлено максимальное значение: 43200 минут (30 дней)");
                 config.ScanIntervalMinutes = 43200;
@@ -726,6 +758,7 @@ namespace SystemInfoService
                 config.MySQLUserId = "root";
             }
         }
+
         static bool CheckDatabaseTables()
         {
             try
@@ -739,29 +772,17 @@ namespace SystemInfoService
                 WHERE TABLE_SCHEMA = DATABASE() 
                 AND TABLE_NAME IN ('Computers', 'GeneralInfo', 'Processors', 
                                   'Motherboards', 'HardDrives', 'Memory', 
-                                  'MemoryModules', 'VideoCards');
-            ";
+                                  'MemoryModules', 'VideoCards', 'InstalledSoftware', 
+                                  'SystemAlerts', 'SecurityInfo');";
 
                     using (var command = new MySqlCommand(sql, connection))
                     {
                         int tableCount = Convert.ToInt32(command.ExecuteScalar());
-                        bool allTablesExist = (tableCount >= 8);
+                        bool allTablesExist = (tableCount >= 11);
 
                         if (!allTablesExist)
                         {
-                            Logger.LogVerbose($"Найдено таблиц: {tableCount} из 8 необходимых");
-
-                            // Показываем какие таблицы есть
-                            string checkSql = "SHOW TABLES;";
-                            using (var checkCommand = new MySqlCommand(checkSql, connection))
-                            using (var reader = checkCommand.ExecuteReader())
-                            {
-                                Logger.LogVerbose("Существующие таблицы:");
-                                while (reader.Read())
-                                {
-                                    Logger.LogVerbose($"  - {reader[0]}");
-                                }
-                            }
+                            Logger.LogVerbose($"Найдено таблиц: {tableCount} из 11 необходимых");
                         }
 
                         return allTablesExist;
@@ -774,14 +795,406 @@ namespace SystemInfoService
                 return false;
             }
         }
+
+        // ============================================================
+        // ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ДЛЯ ПОЛУЧЕНИЯ МЕТРИК
+        // ============================================================
+
+        private static double GetCurrentCPUUsage()
+        {
+            try
+            {
+                using (PerformanceCounter cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total"))
+                {
+                    cpuCounter.NextValue();
+                    Thread.Sleep(100);
+                    return Math.Round(cpuCounter.NextValue(), 2);
+                }
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static double GetCurrentMemoryUsage()
+        {
+            try
+            {
+                using (PerformanceCounter memCounter = new PerformanceCounter("Memory", "% Committed Bytes In Use"))
+                {
+                    return Math.Round(memCounter.NextValue(), 2);
+                }
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static double GetFreeDiskSpacePercent()
+        {
+            try
+            {
+                DriveInfo drive = DriveInfo.GetDrives().FirstOrDefault(d => d.IsReady && d.Name == "C:\\");
+                if (drive != null)
+                {
+                    double totalSpace = drive.TotalSize;
+                    double freeSpace = drive.TotalFreeSpace;
+                    return Math.Round((freeSpace / totalSpace) * 100, 2);
+                }
+                return 100;
+            }
+            catch
+            {
+                return 100;
+            }
+        }
+
+        private static double GetCurrentTemperature()
+        {
+            try
+            {
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "SELECT * FROM Win32_TemperatureProbe"))
+                {
+                    foreach (ManagementObject obj in searcher.Get())
+                    {
+                        if (obj["CurrentReading"] != null)
+                        {
+                            return Convert.ToDouble(obj["CurrentReading"]);
+                        }
+                    }
+                }
+                return 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        // ============================================================
+        // ПУБЛИЧНЫЕ МЕТОДЫ ДЛЯ ВЫЗОВА ИЗ СЛУЖБЫ
+        // ============================================================
+
+        public static ConfigSettings LoadConfigFromFileStatic(string configPath)
+        {
+            var defaultConfig = new ConfigSettings();
+
+            if (!File.Exists(configPath))
+            {
+                Logger.LogWarning($"Файл конфигурации не найден: {configPath}");
+                return defaultConfig;
+            }
+
+            try
+            {
+                var config = new ConfigSettings();
+                var lines = File.ReadAllLines(configPath, Encoding.UTF8);
+
+                foreach (string line in lines)
+                {
+                    if (string.IsNullOrWhiteSpace(line) || line.StartsWith(";") || line.StartsWith("#"))
+                        continue;
+
+                    int equalsIndex = line.IndexOf('=');
+                    if (equalsIndex > 0)
+                    {
+                        string key = line.Substring(0, equalsIndex).Trim();
+                        string value = line.Substring(equalsIndex + 1).Trim();
+
+                        switch (key.ToLower())
+                        {
+                            case "scanintervalminutes":
+                                if (double.TryParse(value, out double minutes) && minutes > 0)
+                                    config.ScanIntervalMinutes = minutes;
+                                break;
+
+                            case "scanonstartup":
+                                if (bool.TryParse(value, out bool scanOnStart))
+                                    config.ScanOnStartup = scanOnStart;
+                                break;
+
+                            case "loglevel":
+                                if (value.Equals("Minimal", StringComparison.OrdinalIgnoreCase) ||
+                                    value.Equals("Normal", StringComparison.OrdinalIgnoreCase) ||
+                                    value.Equals("Verbose", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    config.LogLevel = value;
+                                }
+                                break;
+
+                            case "mysqlserver":
+                                config.MySQLServer = value;
+                                break;
+
+                            case "mysqldatabase":
+                                config.MySQLDatabase = value;
+                                break;
+
+                            case "mysqluserid":
+                                config.MySQLUserId = value;
+                                break;
+
+                            case "mysqlpassword":
+                                config.MySQLPassword = value;
+                                break;
+                        }
+                    }
+                }
+
+                return config;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"Ошибка загрузки конфигурации: {ex.Message}");
+                return defaultConfig;
+            }
+        }
+
+        public static void PerformSystemScanStatic()
+        {
+            DateTime scanDateTime = DateTime.Now;
+
+            try
+            {
+                Logger.LogInfo($"Начало сканирования: {scanDateTime:HH:mm:ss}");
+
+                long computerId = MySqlDataRepository.SaveComputerInfo(
+                    Environment.MachineName,
+                    scanDateTime
+                );
+
+                if (computerId <= 0)
+                {
+                    throw new Exception("Не удалось сохранить информацию о компьютере");
+                }
+
+                Logger.LogInfo($"ComputerID: {computerId}");
+
+                bool isNewConfiguration = MySqlDataRepository.IsNewConfiguration(computerId);
+
+                if (!isNewConfiguration)
+                {
+                    Logger.LogInfo("Конфигурация не изменилась. Обновление динамических данных...");
+
+                    // ВСЕГДА СОХРАНЯЕМ ДИНАМИЧЕСКИЕ ДАННЫЕ
+                    MySqlDataRepository.SaveInstalledSoftware(computerId, scanDateTime);
+                    MySqlDataRepository.SaveSecurityInfo(computerId, scanDateTime);
+
+                    double currentCpuUsage = GetCurrentCPUUsage();
+                    double currentMemoryUsage = GetCurrentMemoryUsage();
+                    double currentFreeSpacePercent = GetFreeDiskSpacePercent();
+                    double currentTemperature = GetCurrentTemperature();
+
+                    Logger.LogInfo($"Метрики: CPU={currentCpuUsage:F1}%, RAM={currentMemoryUsage:F1}%, DiskFree={currentFreeSpacePercent:F1}%, Temp={(currentTemperature > 0 ? currentTemperature.ToString("F1") + "°C" : "N/A")}");
+
+                    MySqlDataRepository.CheckAndCreateAlerts(computerId, currentCpuUsage, currentMemoryUsage,
+                                                               currentFreeSpacePercent, currentTemperature, scanDateTime);
+
+                    Logger.LogInfo($"Сканирование завершено (конфигурация не изменилась). ComputerID: {computerId}");
+                    return;
+                }
+
+                Logger.LogInfo("Сохранение новой конфигурации...");
+
+                string ipAddress = MySqlDataRepository.GetLocalIPAddress();
+                MySqlDataRepository.SaveGeneralInfo(
+                    computerId,
+                    Environment.OSVersion.ToString(),
+                    Environment.ProcessorCount,
+                    Environment.UserName,
+                    Environment.Is64BitOperatingSystem,
+                    ipAddress,
+                    scanDateTime
+                );
+
+                Logger.LogInfo($"Общая информация сохранена. IP: {ipAddress}");
+
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("select * from Win32_Processor"))
+                {
+                    foreach (ManagementObject obj in searcher.Get())
+                    {
+                        int? currentClockSpeed = obj["CurrentClockSpeed"] != null ?
+                            Convert.ToInt32(obj["CurrentClockSpeed"]) : (int?)null;
+
+                        int? numberOfCores = obj["NumberOfCores"] != null ?
+                            Convert.ToInt32(obj["NumberOfCores"]) : (int?)null;
+
+                        MySqlDataRepository.SaveProcessorInfo(
+                            computerId,
+                            currentClockSpeed,
+                            obj["Name"]?.ToString(),
+                            obj["Manufacturer"]?.ToString(),
+                            numberOfCores,
+                            obj["Status"]?.ToString(),
+                            scanDateTime
+                        );
+
+                        Logger.LogInfo($"Процессор сохранен: {obj["Name"]?.ToString()}");
+                        break;
+                    }
+                }
+
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("select * from Win32_BaseBoard"))
+                {
+                    foreach (ManagementObject obj in searcher.Get())
+                    {
+                        MySqlDataRepository.SaveMotherboardInfo(
+                            computerId,
+                            obj["Manufacturer"]?.ToString(),
+                            obj["Product"]?.ToString(),
+                            obj["SerialNumber"]?.ToString(),
+                            obj["Version"]?.ToString(),
+                            obj["Caption"]?.ToString(),
+                            scanDateTime
+                        );
+
+                        Logger.LogInfo($"Материнская плата сохранена: {obj["Manufacturer"]?.ToString()} {obj["Product"]?.ToString()}");
+                        break;
+                    }
+                }
+
+                int driveCount = 0;
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("select * from Win32_DiskDrive"))
+                {
+                    foreach (ManagementObject obj in searcher.Get())
+                    {
+                        ulong sizeBytes = obj["Size"] != null ? Convert.ToUInt64(obj["Size"]) : 0;
+                        double sizeGB = sizeBytes / 1073741824.0;
+
+                        int? bytesPerSector = obj["BytesPerSector"] != null ?
+                            Convert.ToInt32(obj["BytesPerSector"]) : (int?)null;
+
+                        long? totalSectors = obj["TotalSectors"] != null ?
+                            Convert.ToInt64(obj["TotalSectors"]) : (long?)null;
+
+                        MySqlDataRepository.SaveHardDriveInfo(
+                            computerId,
+                            obj["Model"]?.ToString(),
+                            obj["InterfaceType"]?.ToString(),
+                            obj["SerialNumber"]?.ToString(),
+                            sizeGB,
+                            bytesPerSector,
+                            totalSectors,
+                            scanDateTime
+                        );
+
+                        driveCount++;
+                        Logger.LogInfo($"Диск {driveCount}: {obj["Model"]?.ToString()} ({sizeGB:F2} GB)");
+                    }
+                }
+
+                double totalMemoryGB = 0;
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("select * from Win32_ComputerSystem"))
+                {
+                    foreach (ManagementObject obj in searcher.Get())
+                    {
+                        if (obj["TotalPhysicalMemory"] != null)
+                        {
+                            totalMemoryGB = Convert.ToUInt64(obj["TotalPhysicalMemory"]) / 1073741824.0;
+                        }
+                        break;
+                    }
+                }
+
+                long memoryId = MySqlDataRepository.SaveMemoryInfo(computerId, totalMemoryGB, scanDateTime);
+                int moduleCount = 0;
+
+                if (memoryId > 0)
+                {
+                    Logger.LogInfo($"Оперативная память: {totalMemoryGB:F2} GB");
+
+                    using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("SELECT * FROM Win32_PhysicalMemory"))
+                    {
+                        foreach (ManagementObject module in searcher.Get())
+                        {
+                            double capacityGB = module["Capacity"] != null ?
+                                Convert.ToUInt64(module["Capacity"]) / 1073741824.0 : 0;
+
+                            int? speedMHz = module["Speed"] != null ?
+                                Convert.ToInt32(module["Speed"]) : (int?)null;
+
+                            MySqlDataRepository.SaveMemoryModuleInfo(
+                                memoryId,
+                                module["DeviceLocator"]?.ToString(),
+                                module["Manufacturer"]?.ToString(),
+                                module["SerialNumber"]?.ToString(),
+                                capacityGB,
+                                speedMHz,
+                                moduleCount
+                            );
+
+                            moduleCount++;
+                            Logger.LogInfo($"Модуль памяти {moduleCount}: {capacityGB:F2} GB");
+                        }
+                    }
+                }
+
+                int videoCount = 0;
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher("select * from Win32_VideoController"))
+                {
+                    foreach (ManagementObject obj in searcher.Get())
+                    {
+                        ulong vramBytes = obj["AdapterRAM"] != null ? Convert.ToUInt64(obj["AdapterRAM"]) : 0;
+                        double vramGB = vramBytes / 1073741824.0;
+
+                        int? refreshRate = obj["CurrentRefreshRate"] != null ?
+                            Convert.ToInt32(obj["CurrentRefreshRate"]) : (int?)null;
+
+                        MySqlDataRepository.SaveVideoCardInfo(
+                            computerId,
+                            obj["Name"]?.ToString(),
+                            obj["AdapterCompatibility"]?.ToString(),
+                            vramGB,
+                            refreshRate,
+                            obj["DriverVersion"]?.ToString(),
+                            scanDateTime
+                        );
+
+                        videoCount++;
+                        Logger.LogInfo($"Видеокарта {videoCount}: {obj["Name"]?.ToString()} ({vramGB:F2} GB)");
+                    }
+                }
+
+                // Динамические данные для новой конфигурации
+                Logger.LogInfo("Сбор информации об установленных программах...");
+                MySqlDataRepository.SaveInstalledSoftware(computerId, scanDateTime);
+
+                Logger.LogInfo("Сбор информации о безопасности...");
+                MySqlDataRepository.SaveSecurityInfo(computerId, scanDateTime);
+
+                double newCpuUsage = GetCurrentCPUUsage();
+                double newMemoryUsage = GetCurrentMemoryUsage();
+                double newFreeSpacePercent = GetFreeDiskSpacePercent();
+                double newTemperature = GetCurrentTemperature();
+
+                Logger.LogInfo($"Метрики: CPU={newCpuUsage:F1}%, RAM={newMemoryUsage:F1}%, DiskFree={newFreeSpacePercent:F1}%, Temp={(newTemperature > 0 ? newTemperature.ToString("F1") + "°C" : "N/A")}");
+
+                Logger.LogInfo("Проверка системных предупреждений...");
+                MySqlDataRepository.CheckAndCreateAlerts(computerId, newCpuUsage, newMemoryUsage,
+                                                           newFreeSpacePercent, newTemperature, scanDateTime);
+
+                Logger.LogInfo($"Сканирование завершено. Сохранена новая конфигурация");
+                Logger.LogInfo($"Сохранено: Процессор:1, Диски:{driveCount}, Память:1, Модули:{moduleCount}, Видеокарты:{videoCount}");
+                Logger.LogInfo($"Программы: список сохранен, Безопасность: данные сохранены, Предупреждения: проверка выполнена");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"Ошибка сканирования: {ex.Message}");
+                Logger.LogError(ex);
+                throw;
+            }
+        }
     }
+
     public class ConfigSettings
     {
         public double ScanIntervalMinutes { get; set; } = 60;
         public bool ScanOnStartup { get; set; } = true;
         public string LogLevel { get; set; } = "Normal";
 
-        // MySQL настройки
         public string MySQLServer { get; set; } = "localhost";
         public string MySQLDatabase { get; set; } = "system_monitoring";
         public string MySQLUserId { get; set; } = "root";
